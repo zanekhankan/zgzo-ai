@@ -1,62 +1,21 @@
 import streamlit as st
-import json
-import os
-from datetime import datetime
 import pandas as pd
-from io import BytesIO
+import json
 from fpdf import FPDF
+from io import BytesIO
+from datetime import date, datetime
 
-# --- User DB ---
-USER_DB = {
-    "admin": "admin123",
-    "estimator1": "bidmaster",
-    "guest": "test123"
-}
+st.set_page_config(page_title="ZGZO.AI Bid Generator", layout="wide")
 
-# --- Session State ---
+# --- Authentication ---
+USER_DB = {"admin": "admin123", "guest": "test123"}
+
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "username" not in st.session_state:
     st.session_state.username = ""
-if "saved_bids" not in st.session_state:
-    st.session_state.saved_bids = {}
 
-# --- Files ---
-COST_MEMORY_FILE = "cost_memory.json"
-CORRECTION_LOG_FILE = "correction_log.json"
-DELETE_LOG_FILE = "delete_log.json"
-PROFILE_FILE = "gc_profile.json"
-USER_LOG_FILE = "user_log.json"
-
-# --- Load/Save Functions ---
-def load_data(file):
-    try:
-        with open(file, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-def save_data(data, file):
-    with open(file, 'w') as f:
-        json.dump(data, f, indent=2)
-
-# --- Data Load ---
-cost_memory = load_data(COST_MEMORY_FILE)
-correction_log = load_data(CORRECTION_LOG_FILE)
-delete_log = load_data(DELETE_LOG_FILE)
-gc_profiles = load_data(PROFILE_FILE)
-user_log = load_data(USER_LOG_FILE)
-
-# --- Logging ---
-def log_user_action(action):
-    now = datetime.now().isoformat()
-    if st.session_state.username not in user_log:
-        user_log[st.session_state.username] = []
-    user_log[st.session_state.username].append({"time": now, "action": action})
-    save_data(user_log, USER_LOG_FILE)
-
-# --- Auth ---
-def login_ui():
+if not st.session_state.authenticated:
     st.title("🔐 ZGZO.AI Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
@@ -64,159 +23,146 @@ def login_ui():
         if username in USER_DB and USER_DB[username] == password:
             st.session_state.authenticated = True
             st.session_state.username = username
-            log_user_action("Login")
-            st.rerun()
+            st.experimental_rerun()
         else:
             st.error("Invalid credentials")
+    st.stop()
 
-def logout_ui():
-    if st.button("Logout"):
-        log_user_action("Logout")
-        st.session_state.authenticated = False
-        st.session_state.username = ""
-        st.rerun()
+# --- Load past bids ---
+BID_HISTORY_FILE = "bid_history.json"
 
-# --- GC Profiler ---
-def gc_profile_creator():
-    st.subheader("🧱 GC Profiler")
-    name = st.text_input("Company Name")
-    specialty = st.selectbox("Specialty", ["Concrete", "Framing", "Drywall", "Paint", "General"])
-    license_no = st.text_input("License Number")
-    region = st.text_input("Region")
-    if st.button("Save Profile"):
-        gc_profiles[name] = {"specialty": specialty, "license": license_no, "region": region}
-        save_data(gc_profiles, PROFILE_FILE)
-        st.success("Profile saved")
-        log_user_action(f"Saved GC Profile: {name}")
+def load_bid_history():
+    try:
+        with open(BID_HISTORY_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-# --- Corrections/Deletes ---
-def track_price_correction(original, corrected, item):
-    correction = {"original": original, "corrected": corrected, "time": datetime.now().isoformat()}
-    correction_log.setdefault(item, []).append(correction)
-    save_data(correction_log, CORRECTION_LOG_FILE)
-    log_user_action(f"Corrected {item}: {original} → {corrected}")
+def save_bid_history(data):
+    with open(BID_HISTORY_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
 
-def track_deleted_item(item):
-    delete_log[item] = delete_log.get(item, 0) + 1
-    save_data(delete_log, DELETE_LOG_FILE)
-    log_user_action(f"Deleted item: {item}")
+bid_history = load_bid_history()
+user_bids = bid_history.get(st.session_state.username, {})
 
-def update_cost_memory():
-    for item, corrections in correction_log.items():
-        avg = sum(c["corrected"] for c in corrections) / len(corrections)
-        cost_memory[item] = round(cost_memory.get(item, avg) * 0.8 + avg * 0.2, 2)
-    save_data(cost_memory, COST_MEMORY_FILE)
+# --- Interface ---
+st.title("🧾 ZGZO.AI Bid Generator")
 
-# --- AI Suggestions ---
-def get_flagged_items(threshold=3):
-    return [k for k, v in delete_log.items() if v >= threshold]
+st.text_input("Project Name", key="project_name")
+st.text_area("Scope of Work / Description", key="scope")
+st.text_input("Prepared For", key="client")
+st.text_input("Prepared By", key="gc")
+st.text_input("Client Email (Optional)", key="client_email")
+st.date_input("Date", value=date.today(), key="bid_date")
 
-def ai_suggest_line_items():
-    return [
-        {"item": item, "suggested_cost": cost}
-        for item, cost in cost_memory.items()
-        if item not in get_flagged_items()
-    ]
+st.markdown("---")
 
-# --- Autocomplete ---
-def autocomplete_options(prefix):
-    return [item for item in cost_memory if item.lower().startswith(prefix.lower())]
+st.subheader("📋 Line Items")
+if "line_items" not in st.session_state:
+    st.session_state.line_items = pd.DataFrame(columns=["Description", "Quantity", "Unit", "Unit Price", "Total"])
 
-# --- Bid Save/Load ---
-def save_bid(bid_name, bid_data):
-    st.session_state.saved_bids[bid_name] = bid_data
-    log_user_action(f"Saved bid: {bid_name}")
+edited_table = st.data_editor(
+    st.session_state.line_items,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="editor"
+)
 
-def load_bid(bid_name):
-    return st.session_state.saved_bids.get(bid_name, [])
+edited_table["Total"] = edited_table.apply(lambda row: round(float(row["Quantity"] or 0) * float(row["Unit Price"] or 0), 2), axis=1)
+st.session_state.line_items = edited_table
 
-# --- Export PDF ---
-def export_pdf(bid):
+grand_total = edited_table["Total"].sum()
+st.subheader(f"💰 Grand Total: ${grand_total:,.2f}")
+
+# --- PDF Export ---
+def generate_pdf(project, scope, client, gc, email, bid_date, table):
     pdf = FPDF()
     pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(200, 10, txt=f"{project} - Bid Proposal", ln=True, align='C')
     pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="ZGZO.AI Bid Document", ln=True, align='C')
-    for item in bid:
-        pdf.cell(200, 10, txt=f"{item['item']} - ${item['cost']}", ln=True)
-    buffer = BytesIO()
-    pdf.output(buffer)
-    return buffer
+    pdf.ln(10)
+    pdf.cell(200, 10, txt=f"Prepared For: {client} ({email})", ln=True)
+    pdf.cell(200, 10, txt=f"Prepared By: {gc}", ln=True)
+    pdf.cell(200, 10, txt=f"Date: {bid_date}", ln=True)
+    pdf.ln(10)
+    pdf.multi_cell(0, 10, txt=f"Scope: {scope}")
+    pdf.ln(5)
 
-# --- Main App ---
-if not st.session_state.authenticated:
-    login_ui()
-else:
-    st.title("🧠 ZGZO.AI Full Suite")
-    st.caption(f"👤 Logged in as {st.session_state.username}")
-    logout_ui()
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(60, 10, "Description")
+    pdf.cell(25, 10, "Quantity")
+    pdf.cell(25, 10, "Unit")
+    pdf.cell(30, 10, "Unit Price")
+    pdf.cell(30, 10, "Total", ln=True)
 
-    st.divider()
-    st.header("📂 Upload Files")
-    files = st.file_uploader("Upload plans or docs", accept_multiple_files=True)
-    for f in files:
-        st.success(f"Uploaded: {f.name}")
+    pdf.set_font("Arial", size=12)
+    for _, row in table.iterrows():
+        pdf.cell(60, 10, str(row["Description"]))
+        pdf.cell(25, 10, str(row["Quantity"]))
+        pdf.cell(25, 10, str(row["Unit"]))
+        pdf.cell(30, 10, f"${row['Unit Price']}")
+        pdf.cell(30, 10, f"${row['Total']}", ln=True)
 
-    st.divider()
-    gc_profile_creator()
+    total_sum = table['Total'].sum()
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(140, 10, "Total Bid:")
+    pdf.cell(30, 10, f"${round(total_sum, 2)}", ln=True)
 
-    st.divider()
-    st.header("📌 AI Line Item Suggestions")
-    if st.button("🔁 Refresh Suggestions"):
-        update_cost_memory()
-    for suggestion in ai_suggest_line_items():
-        st.write(f"**{suggestion['item']}** — ${suggestion['suggested_cost']}")
+    pdf.ln(10)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(200, 10, "Signature: ______________________", ln=True)
 
-    st.divider()
-    st.header("⚡ AI Autocomplete Input")
-    prefix = st.text_input("Start typing line item...")
-    if prefix:
-        matches = autocomplete_options(prefix)
-        st.write("Suggestions:", matches[:5])
+    pdf_output = BytesIO()
+    pdf.output(pdf_output)
+    pdf_output.seek(0)
+    return pdf_output
 
-    st.divider()
-    st.header("✍️ Log Price Correction")
-    item = st.text_input("Item")
-    original = st.number_input("Original Cost")
-    corrected = st.number_input("Corrected Cost")
-    if st.button("Log Correction"):
-        track_price_correction(original, corrected, item)
-        st.success("Logged correction")
+if st.button("📤 Generate PDF"):
+    if len(st.session_state.line_items) == 0:
+        st.warning("Add some line items first!")
+    else:
+        pdf_data = generate_pdf(
+            st.session_state.project_name,
+            st.session_state.scope,
+            st.session_state.client,
+            st.session_state.gc,
+            st.session_state.client_email,
+            st.session_state.bid_date,
+            st.session_state.line_items
+        )
+        st.download_button("Download Bid PDF", data=pdf_data, file_name="ZGZO_Bid.pdf")
 
-    st.divider()
-    st.header("🗑️ Log Deleted Item")
-    del_item = st.text_input("Item to Delete")
-    if st.button("Log Deletion"):
-        track_deleted_item(del_item)
-        st.success("Logged deletion")
+# --- Save Bid ---
+st.text_input("Save Current Bid As", key="save_name")
+if st.button("💾 Save Bid"):
+    name = st.session_state.save_name.strip()
+    if name:
+        user_bids[name] = {
+            "project": st.session_state.project_name,
+            "scope": st.session_state.scope,
+            "client": st.session_state.client,
+            "gc": st.session_state.gc,
+            "email": st.session_state.client_email,
+            "date": str(st.session_state.bid_date),
+            "rows": st.session_state.line_items.to_dict(orient="records")
+        }
+        bid_history[st.session_state.username] = user_bids
+        save_bid_history(bid_history)
+        st.success("Bid saved.")
 
-    st.divider()
-    st.header("💵 Markup Settings")
-    global_markup = st.slider("Global Markup %", 0, 100, 10)
-
-    st.divider()
-    st.header("💾 Save & Export Bids")
-    bid_items = st.text_area("Enter line items (one per line, format: name,cost)")
-    parsed_bid = []
-    for line in bid_items.strip().split("\n"):
-        if line:
-            parts = line.split(',')
-            if len(parts) == 2:
-                name, cost = parts[0], float(parts[1])
-                marked_cost = round(cost * (1 + global_markup / 100), 2)
-                parsed_bid.append({"item": name, "cost": marked_cost})
-
-    bid_name = st.text_input("Bid Name")
-    if st.button("Save This Bid"):
-        save_bid(bid_name, parsed_bid)
-        st.success("Bid saved")
-
-    if st.button("📥 Export PDF"):
-        pdf_data = export_pdf(parsed_bid)
-        st.download_button("Download PDF", data=pdf_data.getvalue(), file_name="bid.pdf")
-
-    st.divider()
-    st.header("📁 Load Saved Bid")
-    selected = st.selectbox("Choose Saved Bid", list(st.session_state.saved_bids.keys()))
-    if st.button("Load Selected Bid"):
-        loaded = load_bid(selected)
-        st.write(loaded)
+# --- Load Bid ---
+st.selectbox("Load a Previous Bid", options=["Select..."] + list(user_bids.keys()), key="load_choice")
+if st.button("📂 Load Selected Bid"):
+    name = st.session_state.load_choice
+    if name and name != "Select...":
+        bid = user_bids[name]
+        st.session_state.project_name = bid["project"]
+        st.session_state.scope = bid["scope"]
+        st.session_state.client = bid["client"]
+        st.session_state.gc = bid["gc"]
+        st.session_state.client_email = bid["email"]
+        st.session_state.bid_date = pd.to_datetime(bid["date"]).date()
+        st.session_state.line_items = pd.DataFrame(bid["rows"])
+        st.success(f"Bid '{name}' loaded.")
