@@ -23,7 +23,7 @@ if not st.session_state.authenticated:
         if username in USER_DB and USER_DB[username] == password:
             st.session_state.authenticated = True
             st.session_state.username = username
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Invalid credentials")
     st.stop()
