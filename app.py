@@ -1,11 +1,20 @@
 import streamlit as st
 import pandas as pd
 import json
+import openai
+import smtplib
 from fpdf import FPDF
 from io import BytesIO
 from datetime import date, datetime
+from email.message import EmailMessage
+import os
 
 st.set_page_config(page_title="ZGZO.AI Bid Generator", layout="wide")
+
+# --- Ensure bid_history.json exists ---
+if not os.path.exists("bid_history.json"):
+    with open("bid_history.json", "w") as f:
+        f.write("{}")
 
 # --- Authentication ---
 USER_DB = {"admin": "admin123", "guest": "test123"}
@@ -45,11 +54,34 @@ def save_bid_history(data):
 bid_history = load_bid_history()
 user_bids = bid_history.get(st.session_state.username, {})
 
+# --- AI Suggestion (OpenAI API must be configured) ---
+def ai_suggest_line_items(scope):
+    try:
+        openai.api_key = st.secrets["openai_api_key"]
+        prompt = f"Generate a list of construction bid line items with quantity, unit, and unit price for the following scope: {scope}"
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        content = response.choices[0].message.content
+        rows = [x.split(',') for x in content.strip().split('\n') if len(x.split(',')) == 4]
+        return pd.DataFrame(rows, columns=["Description", "Quantity", "Unit", "Unit Price"])
+    except Exception as e:
+        st.warning(f"AI suggestion failed: {e}")
+        return pd.DataFrame(columns=["Description", "Quantity", "Unit", "Unit Price"])
+
 # --- Interface ---
 st.title("🧾 ZGZO.AI Bid Generator")
 
-st.text_input("Project Name", key="project_name")
-st.text_area("Scope of Work / Description", key="scope")
+project_name = st.text_input("Project Name", key="project_name")
+if project_name == "" and len(user_bids) > 0:
+    st.info("Choose from past bids:")
+    st.write(list(user_bids.keys()))
+
+scope = st.text_area("Scope of Work / Description", key="scope")
+if st.button("🧠 AI Suggest Line Items"):
+    st.session_state.line_items = ai_suggest_line_items(scope)
+
 st.text_input("Prepared For", key="client")
 st.text_input("Prepared By", key="gc")
 st.text_input("Client Email (Optional)", key="client_email")
@@ -133,6 +165,24 @@ if st.button("📤 Generate PDF"):
             st.session_state.line_items
         )
         st.download_button("Download Bid PDF", data=pdf_data, file_name="ZGZO_Bid.pdf")
+
+        if st.session_state.client_email:
+            with st.spinner("Sending bid to client..."):
+                try:
+                    msg = EmailMessage()
+                    msg['Subject'] = f"Bid Proposal: {st.session_state.project_name}"
+                    msg['From'] = "your_email@example.com"
+                    msg['To'] = st.session_state.client_email
+                    msg.set_content("Attached is the bid proposal you requested.")
+                    msg.add_attachment(pdf_data.read(), maintype='application', subtype='pdf', filename="ZGZO_Bid.pdf")
+
+                    with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                        server.starttls()
+                        server.login("your_email@example.com", "your_password")
+                        server.send_message(msg)
+                    st.success("Bid emailed to client.")
+                except Exception as e:
+                    st.warning(f"Email failed: {e}")
 
 # --- Save Bid ---
 st.text_input("Save Current Bid As", key="save_name")
