@@ -1,3 +1,6 @@
 streamlit
-fpdf
 pandas
+openai
+fpdf
+smtplib
+email
